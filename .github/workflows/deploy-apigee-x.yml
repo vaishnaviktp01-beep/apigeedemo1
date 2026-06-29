@@ -1,0 +1,98 @@
+name: Deploy Apigee proxy to Apigee X (eval)
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  # Provide APIGEE_API_NAME as a secret (recommended) or change this to derive from folder
+  API_NAME: ${{ secrets.APIGEE_API_NAME }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip jq curl
+
+      - name: Create proxy bundle (zip)
+        run: |
+          if [ ! -d "apiproxy" ]; then
+            echo "apiproxy/ folder not found in repo root" >&2
+            exit 1
+          fi
+          rm -f proxy.zip
+          zip -r proxy.zip apiproxy
+        shell: bash
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Import proxy to Apigee
+        id: import
+        run: |
+          set -e
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+          ORG="${{ secrets.APIGEE_ORG }}"
+          API_NAME="${{ env.API_NAME }}"
+          if [ -z "$API_NAME" ] || [ "$API_NAME" = "null" ]; then
+            echo "APIGEE_API_NAME is empty — set the secret APIGEE_API_NAME" >&2
+            exit 1
+          fi
+
+          echo "Importing $API_NAME into Apigee organization $ORG ..."
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: multipart/form-data" \
+            -F "file=@proxy.zip" \
+            "https://apigee.googleapis.com/v1/organizations/${ORG}/apis?action=import&name=${API_NAME}")
+
+          echo "Import response:"
+          echo "$RESPONSE" | jq .
+
+          REV=$(echo "$RESPONSE" | jq -r '.revision')
+          if [ -z "$REV" ] || [ "$REV" = "null" ]; then
+            echo "Failed to import proxy or parse revision from response" >&2
+            exit 1
+          fi
+          echo "Imported revision: $REV"
+          echo "revision=$REV" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Deploy imported revision to eval
+        run: |
+          set -e
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+          ORG="${{ secrets.APIGEE_ORG }}"
+          ENV="${{ secrets.APIGEE_ENV }}"
+          API_NAME="${{ env.API_NAME }}"
+          REV="${{ steps.import.outputs.revision }}"
+
+          echo "Deploying ${API_NAME} revision ${REV} to environment ${ENV} ..."
+          DEPLOY_RES=$(curl -s -X POST \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://apigee.googleapis.com/v1/organizations/${ORG}/environments/${ENV}/apis/${API_NAME}/revisions/${REV}/deployments")
+
+          echo "Deploy response:"
+          echo "$DEPLOY_RES" | jq .
+        shell: bash
+
+      - name: (optional) Smoke test / health check
+        if: always()
+        run: |
+          echo "Add smoke test for your API endpoint here (optional)."
+        shell: bash
