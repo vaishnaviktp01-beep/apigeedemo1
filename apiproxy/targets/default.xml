@@ -11,6 +11,6 @@
     <Response/>
   </PostFlow>
   <HTTPTargetConnection>
-    <URL>https://postman-echo.com/get</URL>
+    <URL>https://mocktarget.apigee.net</URL>
   </HTTPTargetConnection>
 </TargetEndpoint>
